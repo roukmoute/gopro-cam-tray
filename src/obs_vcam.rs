@@ -79,8 +79,6 @@ pub struct ObsVirtualCam {
     handle: Handle,
     base: *mut u8,
     offsets: [usize; FRAME_COUNT],
-    cx: u32,
-    cy: u32,
     y_size: usize,
 }
 
@@ -153,15 +151,9 @@ impl ObsVirtualCam {
                 handle,
                 base,
                 offsets,
-                cx,
-                cy,
                 y_size: (cx as usize) * (cy as usize),
             })
         }
-    }
-
-    pub fn size(&self) -> (u32, u32) {
-        (self.cx, self.cy)
     }
 
     /// Publish one NV12 frame. `y` must be `cx*cy` bytes (stride == cx) and `uv`

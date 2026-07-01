@@ -2,7 +2,7 @@
 name = "gopro-cam-tray"
 version = "0.1.0"
 edition = "2021"
-description = "Tiny Windows tray app that turns a GoPro into a webcam via the OBS Virtual Camera"
+description = "Tiny native tray app that turns a GoPro into a webcam via the OBS Virtual Camera"
 license = "MIT"
 readme = "README.md"
 

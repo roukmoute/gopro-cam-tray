@@ -75,7 +75,7 @@ pub fn run(ctrl: Arc<Control>) {
             ..Default::default()
         };
         write_tip(&mut nid.szTip, "GoPro Cam");
-        Shell_NotifyIconW(NIM_ADD, &nid);
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
 
         // Message loop.
         let mut msg = MSG::default();
@@ -85,7 +85,7 @@ pub fn run(ctrl: Arc<Control>) {
         }
 
         // Remove the tray icon on exit.
-        Shell_NotifyIconW(NIM_DELETE, &nid);
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
     }
 }
 
