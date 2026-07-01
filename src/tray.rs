@@ -349,3 +349,44 @@ fn nv12_to_bgra(w: usize, h: usize, y: &[u8], uv: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::nv12_to_bgra;
+
+    // Build a solid-colour NV12 image (every pixel the same Y/U/V).
+    fn solid(w: usize, h: usize, y: u8, u: u8, v: u8) -> (Vec<u8>, Vec<u8>) {
+        let yp = vec![y; w * h];
+        let mut uv = vec![0u8; w * h / 2];
+        for pair in uv.chunks_mut(2) {
+            pair[0] = u;
+            pair[1] = v;
+        }
+        (yp, uv)
+    }
+
+    #[test]
+    fn output_is_bgra_sized_and_opaque() {
+        let (y, uv) = solid(4, 2, 128, 128, 128);
+        let out = nv12_to_bgra(4, 2, &y, &uv);
+        assert_eq!(out.len(), 4 * 2 * 4);
+        assert!(out.chunks(4).all(|p| p[3] == 255), "alpha must be opaque");
+    }
+
+    #[test]
+    fn black_and_white_map_correctly() {
+        // BT.601 limited range: Y=16 -> black, Y=235 -> white, neutral chroma.
+        let (y, uv) = solid(2, 2, 16, 128, 128);
+        assert_eq!(&nv12_to_bgra(2, 2, &y, &uv)[0..4], &[0, 0, 0, 255]);
+
+        let (y, uv) = solid(2, 2, 235, 128, 128);
+        assert_eq!(&nv12_to_bgra(2, 2, &y, &uv)[0..4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn red_uses_bgra_byte_order() {
+        // BT.601 red (Y=81, U=90, V=240) must come out as B=0, G=0, R=255.
+        let (y, uv) = solid(2, 2, 81, 90, 240);
+        assert_eq!(&nv12_to_bgra(2, 2, &y, &uv)[0..4], &[0, 0, 255, 255]);
+    }
+}
