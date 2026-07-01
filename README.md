@@ -1,7 +1,8 @@
 # GoPro Cam
 
-A tiny, native tray app that turns a **GoPro** into a **webcam**. It is a
-lightweight replacement for GoPro's official (and rarely updated) webcam utility.
+A tiny, native app that turns a **GoPro** into a **webcam** — a lightweight
+replacement for GoPro's official (and rarely updated) webcam utility. Runs on
+**Windows** (system-tray app) and **Linux** (CLI, via v4l2loopback).
 
 - Small and light: ~800 KB executable, ~10 MB RAM at idle.
 - No background bloat: no console window, single instance, lives in the system tray.
@@ -13,14 +14,15 @@ lightweight replacement for GoPro's official (and rarely updated) webcam utility
 
 ## Download
 
-Download the latest `.exe` directly:
+Latest builds (single executable, no installer):
 
-**[⬇ Download gopro-cam-tray.exe (latest)](https://github.com/roukmoute/gopro-cam-tray/releases/latest/download/gopro-cam-tray.exe)**
+- **Windows:** [⬇ gopro-cam-tray.exe](https://github.com/roukmoute/gopro-cam-tray/releases/latest/download/gopro-cam-tray.exe)
+  (on first run see [Windows SmartScreen](#windows-smartscreen) below)
+- **Linux (x86-64, static):** [⬇ gopro-cam-tray](https://github.com/roukmoute/gopro-cam-tray/releases/latest/download/gopro-cam-tray)
+  (`chmod +x gopro-cam-tray` before running)
 
-or browse every version on the
-[Releases](https://github.com/roukmoute/gopro-cam-tray/releases) page. It's a
-single executable, no installer. On first run, see
-[Windows SmartScreen](#windows-smartscreen) below.
+Or browse every version on the
+[Releases](https://github.com/roukmoute/gopro-cam-tray/releases) page.
 
 ## How it works
 
@@ -37,13 +39,24 @@ documented HTTP API, then processes the stream in a few steps:
 
 ## Requirements
 
+Common: a **GoPro** that streams over USB (recent models start automatically
+when powered on and connected over USB-C, nothing to enable on the camera).
+
+**Windows:**
 - **[OBS Studio](https://github.com/obsproject/obs-studio/releases) installed**
   (for its virtual-camera component). OBS does not need to be running; its
   virtual-camera module just needs to be registered, which happens once you
   install OBS and start its virtual camera a single time.
-- A **GoPro** that streams over USB (recent models start automatically when
-  powered on and connected over USB-C, nothing to enable on the camera).
-- A **Rust toolchain** to build.
+
+**Linux:**
+- **`ffmpeg`** installed (`sudo apt install ffmpeg`).
+- The **`v4l2loopback`** kernel module (`sudo apt install v4l2loopback-dkms`),
+  loaded to create the virtual camera device:
+  ```
+  sudo modprobe v4l2loopback exclusive_caps=1 card_label="GoPro"
+  ```
+
+To build from source: a **Rust toolchain**.
 
 ## Build
 
@@ -52,6 +65,8 @@ cargo build --release
 ```
 
 ## Usage
+
+### Windows
 
 1. Run the app. A camera icon appears in the system tray.
 2. Turn the GoPro on and connect it over USB.

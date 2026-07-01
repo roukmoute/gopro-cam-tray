@@ -7,14 +7,22 @@ const HTTP_PORT: u16 = 8080;
 const GOPRO_HOST_OCTET: u8 = 51;
 
 /// Find the GoPro on the USB network interface it exposes when connected.
+///
+/// The GoPro USB net uses 172.2x.y.z with the camera at `.51`. We skip virtual
+/// interfaces (Docker bridges, veth, ...) which on some machines occupy many
+/// 172.x nets and would otherwise make us probe the wrong subnets, and use a
+/// short timeout so scanning stays quick.
 pub fn detect() -> Option<Ipv4Addr> {
     let ifaces = if_addrs::get_if_addrs().ok()?;
     for iface in ifaces {
+        if iface.is_loopback() || is_virtual(&iface.name) {
+            continue;
+        }
         if let IpAddr::V4(v4) = iface.ip() {
             let o = v4.octets();
             if o[0] == 172 && (20..=29).contains(&o[1]) {
                 let candidate = Ipv4Addr::new(o[0], o[1], o[2], GOPRO_HOST_OCTET);
-                if http_get(candidate, "/gopro/webcam/version").is_ok() {
+                if get(candidate, "/gopro/webcam/version", 2).is_ok() {
                     return Some(candidate);
                 }
             }
@@ -23,10 +31,22 @@ pub fn detect() -> Option<Ipv4Addr> {
     None
 }
 
+/// True for virtual/container/bridge interfaces we should never probe.
+fn is_virtual(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["br-", "veth", "docker", "virbr", "tap", "tun", "vmnet", "zt"]
+        .iter()
+        .any(|p| n.starts_with(p))
+}
+
 pub fn http_get(ip: Ipv4Addr, path: &str) -> Result<String, String> {
+    get(ip, path, 4)
+}
+
+fn get(ip: Ipv4Addr, path: &str, timeout_secs: u64) -> Result<String, String> {
     let url = format!("http://{ip}:{HTTP_PORT}{path}");
     ureq::get(&url)
-        .timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(timeout_secs))
         .call()
         .map_err(|e| e.to_string())?
         .into_string()
