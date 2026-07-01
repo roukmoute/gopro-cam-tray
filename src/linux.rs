@@ -158,6 +158,12 @@ fn spawn_ffplay(device: &str) -> std::io::Result<Child> {
         "-hide_banner",
         "-loglevel",
         "error",
+        // Small, always-on-top thumbnail instead of a full-size window.
+        "-x",
+        "480",
+        "-y",
+        "270",
+        "-alwaysontop",
         "-window_title",
         "GoPro — Aperçu",
         device,
