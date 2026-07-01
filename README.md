@@ -74,8 +74,10 @@ implementation targets the desktop; Linux and macOS backends are on the roadmap.
 
 - The [OBS Studio](https://github.com/obsproject/obs-studio) project (the
   virtual-camera shared-memory format is reproduced from its virtual-camera plugin).
-- The GoPro reverse-engineering community (Open GoPro,
-  `gopro_as_webcam_on_linux`, `GoProStream`).
+- The GoPro reverse-engineering community:
+  [Open GoPro](https://gopro.github.io/OpenGoPro/),
+  [gopro_as_webcam_on_linux](https://github.com/jschmid1/gopro_as_webcam_on_linux),
+  and [GoProStream](https://github.com/KonradIT/GoProStream).
 
 ## License
 
