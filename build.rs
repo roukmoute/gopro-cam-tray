@@ -4,6 +4,10 @@
 // Details and as the program name in the UAC dialog. (It does NOT remove the
 // SmartScreen "unknown publisher" warning — that requires code signing.)
 fn main() {
+    // Rebuild when the icon or this script changes.
+    println!("cargo:rerun-if-changed=assets/goprocam.ico");
+    println!("cargo:rerun-if-changed=build.rs");
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/goprocam.ico");
