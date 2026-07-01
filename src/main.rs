@@ -1,6 +1,6 @@
 //! GoPro webcam — minimal system-tray edition.
 //!
-//! Runs hidden in the background: waits for the GoPro (webcam mode) and streams
+//! Runs hidden in the background: waits for the GoPro over USB and streams
 //! it to the OBS Virtual Camera whenever connected. A tray icon lets you:
 //!   - suspend streaming (auto-resumes when the camera is re-plugged),
 //!   - toggle "run at login",

@@ -6,7 +6,7 @@ use std::time::Duration;
 const HTTP_PORT: u16 = 8080;
 const GOPRO_HOST_OCTET: u8 = 51;
 
-/// Find the GoPro on the USB network interface it exposes in webcam mode.
+/// Find the GoPro on the USB network interface it exposes when connected.
 pub fn detect() -> Option<Ipv4Addr> {
     let ifaces = if_addrs::get_if_addrs().ok()?;
     for iface in ifaces {

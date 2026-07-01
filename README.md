@@ -53,6 +53,13 @@ Right-click the tray icon:
 | **Lancer au démarrage** | Toggle auto-start at login (a hidden launcher in the Startup folder) |
 | **Quitter** | Quit for good |
 
+### Windows SmartScreen
+
+The released `.exe` is not code-signed, so on first run Windows may warn
+"Windows protected your PC" with an unknown publisher. Click **More info**, then
+**Run anyway**. Removing this warning would require a paid code-signing
+certificate.
+
 ## Platform support
 
 The portable core (HTTP control plus UDP capture) is platform-agnostic; only the
