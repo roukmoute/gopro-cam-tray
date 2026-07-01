@@ -184,7 +184,16 @@ impl ksni::Tray for GoProTray {
         "gopro-cam-tray".into()
     }
     fn icon_name(&self) -> String {
+        // Fallback if a host ignores the pixmap below.
         "camera-web".into()
+    }
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        // Our own GoPro icon as 64x64 ARGB32 (network byte order), embedded.
+        vec![ksni::Icon {
+            width: 64,
+            height: 64,
+            data: include_bytes!("../assets/tray-icon.argb").to_vec(),
+        }]
     }
     fn title(&self) -> String {
         "GoPro Cam".into()
