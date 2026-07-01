@@ -26,9 +26,14 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# Linux-only: Ctrl+C handling for the CLI daemon.
+# Linux-only: Ctrl+C handling, system-tray (StatusNotifierItem via ksni/zbus,
+# pure Rust so the static musl build stays dependency-free), and libc for the
+# ffmpeg-dies-with-us + single-instance guards.
 [target.'cfg(target_os = "linux")'.dependencies]
 ctrlc = "3"
+ksni = "0.3"
+tokio = { version = "1", features = ["rt", "time", "net"] }
+libc = "0.2"
 
 [build-dependencies]
 # Embeds the app icon into the .exe (Explorer/taskbar icon + resource for the tray).

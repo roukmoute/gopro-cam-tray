@@ -50,11 +50,22 @@ when powered on and connected over USB-C, nothing to enable on the camera).
 
 **Linux:**
 - **`ffmpeg`** installed (`sudo apt install ffmpeg`).
-- The **`v4l2loopback`** kernel module (`sudo apt install v4l2loopback-dkms`),
-  loaded to create the virtual camera device:
+- The **`v4l2loopback`** kernel module, loaded to create the virtual camera:
   ```
+  sudo apt install v4l2loopback-dkms
   sudo modprobe v4l2loopback exclusive_caps=1 card_label="GoPro"
   ```
+  Two common gotchas:
+  - **Recent kernels (6.x):** the distro's `v4l2loopback` package may be too old
+    to build. Install the latest from source instead:
+    ```
+    git clone https://github.com/umlaeute/v4l2loopback
+    cd v4l2loopback && make && sudo make install && sudo depmod -a
+    ```
+  - **Secure Boot:** `modprobe` fails with *"Key was rejected by service"* unless
+    the module is signed. Enroll the DKMS key
+    (`sudo mokutil --import /var/lib/dkms/mok.pub`, then reboot and complete the
+    MOK enrolment), or disable Secure Boot.
 
 To build from source: a **Rust toolchain**.
 
@@ -92,11 +103,26 @@ The released `.exe` is not code-signed, so on first run Windows may warn
 **Run anyway**. Removing this warning would require a paid code-signing
 certificate.
 
+### Linux
+
+1. Make sure `ffmpeg` is installed and `v4l2loopback` is loaded (see
+   [Requirements](#requirements)).
+2. Turn the GoPro on and connect it over USB.
+3. Run the daemon (it auto-detects the v4l2loopback device):
+   ```
+   ./gopro-cam-tray
+   # or force a device:  ./gopro-cam-tray /dev/videoN
+   ```
+   It streams while the camera is connected and waits when it's unplugged;
+   press Ctrl+C to quit.
+4. Select the **"GoPro"** camera (the v4l2loopback device) in your video app.
+
 ## Platform support
 
-The portable core (HTTP control plus UDP capture) is platform-agnostic; only the
-H.264 decoder and the virtual-camera sink are platform-specific. The current
-implementation targets the desktop; Linux and macOS backends are on the roadmap.
+Windows and Linux (x86-64) are supported; macOS is on the roadmap. The core
+(GoPro discovery, HTTP control, UDP capture) is shared. Only the H.264 decode
+and the virtual-camera sink differ per platform: Media Foundation + the OBS
+Virtual Camera on Windows, `ffmpeg` + `v4l2loopback` on Linux.
 
 ## Notes and limitations
 
