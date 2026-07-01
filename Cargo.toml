@@ -1,6 +1,6 @@
 [package]
 name = "gopro-cam-tray"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Tiny native tray app that turns a GoPro into a webcam via the OBS Virtual Camera"
 license = "MIT"
