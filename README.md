@@ -1,8 +1,9 @@
 # GoPro Cam
 
 A tiny, native app that turns a **GoPro** into a **webcam** — a lightweight
-replacement for GoPro's official (and rarely updated) webcam utility. Runs on
-**Windows** (system-tray app) and **Linux** (CLI, via v4l2loopback).
+replacement for GoPro's official (and rarely updated) webcam utility. Runs as a
+**system-tray app** on both **Windows** (OBS Virtual Camera) and **Linux**
+(v4l2loopback).
 
 - Small and light: ~800 KB executable, ~10 MB RAM at idle.
 - No background bloat: no console window, single instance, lives in the system tray.
@@ -108,14 +109,41 @@ certificate.
 1. Make sure `ffmpeg` is installed and `v4l2loopback` is loaded (see
    [Requirements](#requirements)).
 2. Turn the GoPro on and connect it over USB.
-3. Run the daemon (it auto-detects the v4l2loopback device):
+3. Run the app (it auto-detects the v4l2loopback device):
    ```
    ./gopro-cam-tray
    # or force a device:  ./gopro-cam-tray /dev/videoN
    ```
-   It streams while the camera is connected and waits when it's unplugged;
-   press Ctrl+C to quit.
+   A GoPro icon appears in the system tray. It streams while the camera is
+   connected and waits when it's unplugged.
 4. Select the **"GoPro"** camera (the v4l2loopback device) in your video app.
+
+Click the tray icon:
+
+| Menu entry | Effect |
+|---|---|
+| *Status* | GoPro: streaming / suspended / waiting |
+| **Aperçu** | Open a small always-on-top preview window (works while streaming) |
+| **Suspendre (reprend au rebranchement)** | Stop streaming but keep watching; auto-resumes when the camera is re-plugged |
+| **Reprendre** | Resume immediately (when suspended) |
+| **Lancer au démarrage** | Toggle auto-start at login (an XDG autostart entry) |
+| **Quitter** | Quit for good |
+
+The tray uses the StatusNotifierItem protocol, which GNOME (with the
+AppIndicator extension), KDE, and most panels support out of the box.
+
+#### i3 (and other bare WMs)
+
+- **Tray icon:** i3bar only speaks the legacy XEmbed protocol, not
+  StatusNotifierItem, so run an SNI→XEmbed bridge such as
+  [`snixembed`](https://git.sr.ht/~steef/snixembed) (start it before the app,
+  e.g. `snixembed &` in your i3 config).
+- **Preview window:** i3 tiles new windows by default, so the preview would be
+  resized to fill its container. To keep it as a small floating thumbnail, add a
+  rule to `~/.config/i3/config` (the preview's title is exactly `GoPro — Aperçu`):
+  ```
+  for_window [title="GoPro — Aperçu"] floating enable, sticky enable
+  ```
 
 ## Platform support
 
