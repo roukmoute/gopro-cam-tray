@@ -62,10 +62,11 @@ pub fn run() {
 
     // Streaming loop on its own thread.
     let sc = ctrl.clone();
-    let worker = std::thread::spawn(move || stream_loop(sc, device));
+    let dev = device.clone();
+    let worker = std::thread::spawn(move || stream_loop(sc, dev));
 
     // Tray + event loop on the main thread (blocks until quit).
-    run_tray(ctrl.clone());
+    run_tray(ctrl.clone(), device);
 
     ctrl.quit.store(true, Ordering::SeqCst);
     let _ = worker.join();
@@ -149,10 +150,33 @@ fn spawn_ffmpeg(device: &str) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
+/// Open a preview window (ffplay on the loopback). Fire-and-forget: the user
+/// closes the window; it also dies with us via PR_SET_PDEATHSIG.
+fn spawn_ffplay(device: &str) -> std::io::Result<Child> {
+    let mut cmd = Command::new("ffplay");
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-window_title",
+        "GoPro — Aperçu",
+        device,
+    ])
+    .stdin(Stdio::null());
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+    cmd.spawn()
+}
+
 // --- System tray (StatusNotifierItem via ksni) ----------------------------
 
 struct GoProTray {
     ctrl: Arc<Control>,
+    device: String,
 }
 
 impl ksni::Tray for GoProTray {
@@ -186,6 +210,18 @@ impl ksni::Tray for GoProTray {
             .into(),
             MenuItem::Separator,
         ];
+
+        // Preview: open the loopback in ffplay (only shows while streaming).
+        items.push(
+            StandardItem {
+                label: "Aperçu".into(),
+                activate: Box::new(|t: &mut Self| {
+                    let _ = spawn_ffplay(&t.device);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
         if suspended {
             items.push(
@@ -237,7 +273,7 @@ impl ksni::Tray for GoProTray {
     }
 }
 
-fn run_tray(ctrl: Arc<Control>) {
+fn run_tray(ctrl: Arc<Control>, device: String) {
     use ksni::TrayMethods;
 
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -255,7 +291,13 @@ fn run_tray(ctrl: Arc<Control>) {
     };
 
     rt.block_on(async {
-        let handle = GoProTray { ctrl: ctrl.clone() }.spawn().await.ok();
+        let handle = GoProTray {
+            ctrl: ctrl.clone(),
+            device,
+        }
+        .spawn()
+        .await
+        .ok();
         if handle.is_none() {
             eprintln!("Could not register the tray icon (no StatusNotifier host?). Running headless.");
         }
