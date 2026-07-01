@@ -9,7 +9,7 @@
 //! Reuses the proven pipeline: UDP MPEG-TS -> demux -> Windows H.264 decoder
 //! (MFT) -> NV12 -> OBS shared-memory sink. Idle footprint ~8 MB.
 
-#![windows_subsystem = "windows"] // no console window
+#![cfg_attr(not(test), windows_subsystem = "windows")] // no console window (tests keep one)
 
 mod gopro;
 mod mf_decode;

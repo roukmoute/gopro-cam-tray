@@ -171,3 +171,135 @@ fn strip_pes_header(p: &[u8]) -> Option<&[u8]> {
     }
     Some(&p[es_start..])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Build a 188-byte TS packet (payload only, no adaptation field). Short
+    // payloads are padded with 0xFF, exactly like real stuffing.
+    fn ts(pid: u16, pusi: bool, payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![0xFFu8; TS_PACKET];
+        p[0] = SYNC;
+        p[1] = (if pusi { 0x40 } else { 0 }) | ((pid >> 8) as u8 & 0x1F);
+        p[2] = (pid & 0xFF) as u8;
+        p[3] = 0x10; // adaptation_field_control = 01 (payload only)
+        let n = payload.len().min(TS_PACKET - 4);
+        p[4..4 + n].copy_from_slice(&payload[..n]);
+        p
+    }
+
+    // PAT with a single program pointing at `pmt_pid`.
+    fn pat(pmt_pid: u16) -> Vec<u8> {
+        let mut v = vec![0x00u8]; // pointer_field
+        v.extend_from_slice(&[
+            0x00, // table_id (PAT)
+            0xB0, 0x0D, // syntax=1, section_length=13
+            0x00, 0x01, // transport_stream_id
+            0xC1, // version/current_next
+            0x00, 0x00, // section#, last#
+            0x00, 0x01, // program_number = 1
+            0xE0 | ((pmt_pid >> 8) as u8 & 0x1F),
+            (pmt_pid & 0xFF) as u8, // reserved + PMT PID
+            0xDE, 0xAD, 0xBE, 0xEF, // CRC (unchecked by the demuxer)
+        ]);
+        v
+    }
+
+    // PMT declaring one H.264 (stream_type 0x1B) stream on `video_pid`.
+    fn pmt(video_pid: u16) -> Vec<u8> {
+        let mut v = vec![0x00u8]; // pointer_field
+        v.extend_from_slice(&[
+            0x02, // table_id (PMT)
+            0xB0, 0x12, // syntax=1, section_length=18
+            0x00, 0x01, // program_number
+            0xC1, // version/current_next
+            0x00, 0x00, // section#, last#
+            0xE0, 0x00, // reserved + PCR_PID
+            0xF0, 0x00, // reserved + program_info_length = 0
+            0x1B, // stream_type = H.264
+            0xE0 | ((video_pid >> 8) as u8 & 0x1F),
+            (video_pid & 0xFF) as u8, // elementary PID
+            0xF0, 0x00, // reserved + ES_info_length = 0
+            0xDE, 0xAD, 0xBE, 0xEF, // CRC (unchecked)
+        ]);
+        v
+    }
+
+    // Video PES payload (9-byte header + elementary-stream bytes).
+    fn pes(es: &[u8]) -> Vec<u8> {
+        let mut v = vec![0x00, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x80, 0x00, 0x00];
+        v.extend_from_slice(es);
+        v
+    }
+
+    const PMT_PID: u16 = 0x0100;
+    const VID_PID: u16 = 0x0101;
+
+    #[test]
+    fn extracts_access_unit_through_pat_pmt_pes() {
+        let mut d = TsDemux::new();
+        let es1 = [0u8, 0, 0, 1, 0x09, 0x10];
+        let es2 = [0u8, 0, 0, 1, 0x67, 0x42];
+
+        let mut stream = Vec::new();
+        stream.extend(ts(0, true, &pat(PMT_PID)));
+        stream.extend(ts(PMT_PID, true, &pmt(VID_PID)));
+        stream.extend(ts(VID_PID, true, &pes(&es1)));
+        // A second PES (new PUSI) flushes the first access unit.
+        stream.extend(ts(VID_PID, true, &pes(&es2)));
+
+        let aus = d.push(&stream);
+        assert_eq!(aus.len(), 1, "exactly one AU should be flushed");
+        assert!(aus[0].starts_with(&es1), "AU should begin with the first PES payload");
+        assert_eq!(&aus[0][..4], &[0, 0, 0, 1], "AU should start with an Annex-B start code");
+    }
+
+    #[test]
+    fn no_output_until_the_next_pusi() {
+        let mut d = TsDemux::new();
+        let mut stream = Vec::new();
+        stream.extend(ts(0, true, &pat(PMT_PID)));
+        stream.extend(ts(PMT_PID, true, &pmt(VID_PID)));
+        stream.extend(ts(VID_PID, true, &pes(&[0, 0, 0, 1, 0x67])));
+        // Only one PES so far: it is still buffered, nothing flushed yet.
+        assert!(d.push(&stream).is_empty());
+    }
+
+    #[test]
+    fn reassembles_a_pes_split_across_packets() {
+        let mut d = TsDemux::new();
+        // Exact-size payloads (no stuffing) so we can assert byte-for-byte.
+        let head = vec![0xAAu8; TS_PACKET - 4 - 9]; // fills packet 1 exactly
+        let tail = vec![0xBBu8; TS_PACKET - 4]; // fills packet 2 exactly
+
+        let mut stream = Vec::new();
+        stream.extend(ts(0, true, &pat(PMT_PID)));
+        stream.extend(ts(PMT_PID, true, &pmt(VID_PID)));
+        stream.extend(ts(VID_PID, true, &pes(&head))); // starts the AU
+        stream.extend(ts(VID_PID, false, &tail)); // continuation
+        stream.extend(ts(VID_PID, true, &pes(&[0xCC]))); // flush
+
+        let aus = d.push(&stream);
+        assert_eq!(aus.len(), 1);
+        let mut expected = head.clone();
+        expected.extend_from_slice(&tail);
+        assert_eq!(aus[0], expected);
+    }
+
+    #[test]
+    fn resyncs_after_leading_garbage() {
+        let mut d = TsDemux::new();
+        let es = [0u8, 0, 0, 1, 0x65, 0x88];
+
+        let mut stream = vec![0x00, 0x11, 0x22]; // junk before the first sync byte
+        stream.extend(ts(0, true, &pat(PMT_PID)));
+        stream.extend(ts(PMT_PID, true, &pmt(VID_PID)));
+        stream.extend(ts(VID_PID, true, &pes(&es)));
+        stream.extend(ts(VID_PID, true, &pes(&[0, 0, 0, 1, 0x41])));
+
+        let aus = d.push(&stream);
+        assert_eq!(aus.len(), 1);
+        assert!(aus[0].starts_with(&es));
+    }
+}

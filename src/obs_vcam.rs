@@ -70,6 +70,21 @@ fn align32(n: usize) -> usize {
     (n + 31) & !31
 }
 
+/// Compute the 3 frame offsets and the total mapping size, exactly like OBS's
+/// `video_queue_create`: an aligned header, then 3 frame regions each of
+/// `frame_size + FRAME_HEADER_SIZE`, 32-byte aligned. `frame_size` is NV12
+/// (`cx*cy*3/2`).
+fn frame_layout(cx: u32, cy: u32) -> ([usize; FRAME_COUNT], usize) {
+    let frame_size = (cx as usize) * (cy as usize) * 3 / 2;
+    let mut offsets = [0usize; FRAME_COUNT];
+    let mut size = align32(std::mem::size_of::<QueueHeader>());
+    for slot in offsets.iter_mut() {
+        *slot = size;
+        size = align32(size + frame_size + FRAME_HEADER_SIZE);
+    }
+    (offsets, size)
+}
+
 /// Wide, null-terminated name of the mapping OBS looks for.
 fn video_name() -> Vec<u16> {
     "OBSVirtualCamVideo\0".encode_utf16().collect()
@@ -86,16 +101,8 @@ impl ObsVirtualCam {
     /// Create the shared queue as the writer. `interval` is the frame interval
     /// in 100-ns units (e.g. 333_333 for 30 fps).
     pub fn create(cx: u32, cy: u32, interval: u64) -> Result<Self, String> {
-        let frame_size = (cx as usize) * (cy as usize) * 3 / 2;
-
-        // Compute frame offsets exactly like OBS does.
-        let mut offsets = [0usize; FRAME_COUNT];
-        let mut size = align32(std::mem::size_of::<QueueHeader>());
-        for slot in offsets.iter_mut() {
-            *slot = size;
-            size = align32(size + frame_size + FRAME_HEADER_SIZE);
-        }
-        let total = size;
+        // Frame offsets + total mapping size, laid out exactly like OBS.
+        let (offsets, total) = frame_layout(cx, cy);
 
         let name = video_name();
 
@@ -191,5 +198,55 @@ impl Drop for ObsVirtualCam {
             UnmapViewOfFile(self.base as *const c_void);
             CloseHandle(self.handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The queue header must be byte-for-byte compatible with OBS's struct
+    // (write_idx, read_idx, state, offsets[3], type, cx, cy, then a u64 that
+    // forces 8-byte alignment, then reserved[8]) => 80 bytes. If this changes,
+    // the OBS filter would misread the shared memory.
+    #[test]
+    fn header_is_80_bytes() {
+        assert_eq!(std::mem::size_of::<QueueHeader>(), 80);
+    }
+
+    #[test]
+    fn align32_rounds_up_to_multiple_of_32() {
+        assert_eq!(align32(0), 0);
+        assert_eq!(align32(1), 32);
+        assert_eq!(align32(32), 32);
+        assert_eq!(align32(33), 64);
+        assert_eq!(align32(80), 96);
+    }
+
+    #[test]
+    fn frame_layout_matches_obs_algorithm() {
+        let (cx, cy) = (1280u32, 720u32);
+        let frame_size = (cx as usize) * (cy as usize) * 3 / 2;
+        let region = align32(frame_size + FRAME_HEADER_SIZE);
+        let (offsets, total) = frame_layout(cx, cy);
+
+        // First frame starts right after the 32-aligned header (80 -> 96).
+        assert_eq!(offsets[0], 96);
+        // Every offset is 32-byte aligned.
+        assert!(offsets.iter().all(|o| o % 32 == 0));
+        // Frames are strictly increasing and evenly spaced by one region.
+        assert_eq!(offsets[1] - offsets[0], region);
+        assert_eq!(offsets[2] - offsets[1], region);
+        // Total covers the header plus all three frame regions.
+        assert_eq!(total, offsets[2] + region);
+    }
+
+    #[test]
+    fn frame_layout_odd_ish_resolution() {
+        // 1080 is not a multiple of 16; layout must still be self-consistent.
+        let (offsets, total) = frame_layout(1920, 1080);
+        let region = align32(1920 * 1080 * 3 / 2 + FRAME_HEADER_SIZE);
+        assert_eq!(offsets[0], 96);
+        assert_eq!(total, offsets[0] + 3 * region);
     }
 }
