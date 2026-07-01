@@ -11,6 +11,17 @@ lightweight replacement for GoPro's official (and rarely updated) webcam utility
 - Replaces GoPro's official Webcam app: you don't need it installed or running
   (in fact, don't run both at once — see the note below).
 
+## Download
+
+Download the latest `.exe` directly:
+
+**[⬇ Download gopro-cam-tray.exe (latest)](https://github.com/roukmoute/gopro-cam-tray/releases/latest/download/gopro-cam-tray.exe)**
+
+or browse every version on the
+[Releases](https://github.com/roukmoute/gopro-cam-tray/releases) page. It's a
+single executable, no installer. On first run, see
+[Windows SmartScreen](#windows-smartscreen) below.
+
 ## How it works
 
 When it is powered on and connected over USB, the GoPro exposes a USB network
