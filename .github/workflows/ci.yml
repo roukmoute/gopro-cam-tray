@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -20,13 +20,27 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
-          name: gopro-cam-tray
+          name: gopro-cam-tray-windows
           path: target/release/gopro-cam-tray.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release --locked
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: gopro-cam-tray-linux
+          path: target/release/gopro-cam-tray
 
   release:
     # On push to main, cut a release when Cargo.toml's version has no tag yet.
     if: github.ref == 'refs/heads/main'
-    needs: build
+    needs: [build-windows, build-linux]
     runs-on: windows-latest
     permissions:
       contents: write
@@ -50,13 +64,11 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Download build artifacts
         if: steps.check.outputs.exists == 'false'
-      - uses: Swatinem/rust-cache@v2
-        if: steps.check.outputs.exists == 'false'
-      - name: Build (release)
-        if: steps.check.outputs.exists == 'false'
-        run: cargo build --release --locked
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
 
       - name: Create tag and release
         if: steps.check.outputs.exists == 'false'
@@ -65,7 +77,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh release create "v${{ steps.ver.outputs.version }}"
-          "target/release/gopro-cam-tray.exe"
+          "artifacts/gopro-cam-tray-windows/gopro-cam-tray.exe"
+          "artifacts/gopro-cam-tray-linux/gopro-cam-tray"
           --title "v${{ steps.ver.outputs.version }}"
           --target "${{ github.sha }}"
           --generate-notes

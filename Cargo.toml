@@ -7,8 +7,12 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
+# Cross-platform GoPro control (HTTP, no TLS) + USB interface discovery.
 ureq = { version = "2", default-features = false }
 if-addrs = "0.13"
+
+# Windows-only: system tray, OBS shared-memory sink, Media Foundation decoder.
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -22,8 +26,13 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Linux-only: Ctrl+C handling for the CLI daemon.
+[target.'cfg(target_os = "linux")'.dependencies]
+ctrlc = "3"
+
 [build-dependencies]
 # Embeds the app icon into the .exe (Explorer/taskbar icon + resource for the tray).
+# Only invoked when the target is Windows (see build.rs); harmless elsewhere.
 winresource = "0.1"
 
 # Smallest possible release binary.

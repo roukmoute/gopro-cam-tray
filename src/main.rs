@@ -1,36 +1,65 @@
-//! GoPro webcam — minimal system-tray edition.
+//! GoPro webcam — cross-platform.
 //!
-//! Runs hidden in the background: waits for the GoPro over USB and streams
-//! it to the OBS Virtual Camera whenever connected. A tray icon lets you:
-//!   - suspend streaming (auto-resumes when the camera is re-plugged),
-//!   - toggle "run at login",
-//!   - quit for good.
+//! - Windows: a system-tray app that feeds the OBS Virtual Camera
+//!   (UDP MPEG-TS -> demux -> Media Foundation H.264 decoder -> NV12 -> OBS
+//!   shared memory), with a live preview window.
+//! - Linux: a CLI daemon that drives the GoPro and pipes its stream through
+//!   ffmpeg into a v4l2loopback device.
 //!
-//! Reuses the proven pipeline: UDP MPEG-TS -> demux -> Windows H.264 decoder
-//! (MFT) -> NV12 -> OBS shared-memory sink. Idle footprint ~8 MB.
+//! The GoPro discovery + control core (`gopro`) is shared across platforms.
 
-#![cfg_attr(not(test), windows_subsystem = "windows")] // no console window (tests keep one)
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod gopro;
+
+#[cfg(windows)]
 mod mf_decode;
+#[cfg(windows)]
 mod mpegts;
+#[cfg(windows)]
 mod obs_vcam;
+#[cfg(windows)]
 mod startup;
+#[cfg(windows)]
 mod tray;
 
-use mf_decode::Frame;
-use obs_vcam::ObsVirtualCam;
-use std::collections::VecDeque;
-use std::net::Ipv4Addr;
-use std::net::UdpSocket;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+#[cfg(target_os = "linux")]
+mod linux;
 
-const INTERVAL_100NS: u64 = 10_000_000 / 30;
+/// UDP port the GoPro streams MPEG-TS to.
 const STREAM_PORT: u16 = 8554;
 
+fn main() {
+    #[cfg(windows)]
+    windows_main();
+    #[cfg(target_os = "linux")]
+    linux::run();
+}
+
+// ===========================================================================
+// Windows backend
+// ===========================================================================
+
+#[cfg(windows)]
+use mf_decode::Frame;
+#[cfg(windows)]
+use obs_vcam::ObsVirtualCam;
+#[cfg(windows)]
+use std::collections::VecDeque;
+#[cfg(windows)]
+use std::net::{Ipv4Addr, UdpSocket};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::sync::{Arc, Mutex};
+#[cfg(windows)]
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+const INTERVAL_100NS: u64 = 10_000_000 / 30;
+
 /// One decoded frame kept for the preview window (tightly-packed NV12).
+#[cfg(windows)]
 pub struct PreviewFrame {
     pub width: u32,
     pub height: u32,
@@ -39,6 +68,7 @@ pub struct PreviewFrame {
 }
 
 /// Shared control state between the tray (GUI) thread and the watcher thread.
+#[cfg(windows)]
 pub struct Control {
     /// Exit the whole process.
     pub quit: AtomicBool,
@@ -54,6 +84,7 @@ pub struct Control {
     pub preview: Mutex<Option<PreviewFrame>>,
 }
 
+#[cfg(windows)]
 impl Control {
     fn new() -> Self {
         Self {
@@ -66,7 +97,8 @@ impl Control {
     }
 }
 
-fn main() {
+#[cfg(windows)]
+fn windows_main() {
     // Single instance: bail out silently if another copy is already running.
     if already_running() {
         return;
@@ -87,6 +119,7 @@ fn main() {
 }
 
 /// Named-mutex single-instance guard.
+#[cfg(windows)]
 fn already_running() -> bool {
     use windows::core::w;
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
@@ -99,6 +132,7 @@ fn already_running() -> bool {
 }
 
 /// Watcher loop: wait for the GoPro, stream while connected, honour suspend/quit.
+#[cfg(windows)]
 fn watch(ctrl: Arc<Control>) {
     let mut cam: Option<ObsVirtualCam> = None;
     let mut vts: u64 = 0;
@@ -122,6 +156,7 @@ fn watch(ctrl: Arc<Control>) {
     }
 }
 
+#[cfg(windows)]
 enum SessionEnd {
     Disconnected,
     Suspended,
@@ -129,6 +164,7 @@ enum SessionEnd {
 }
 
 /// Stream one connected session; returns on disconnect, suspend, or quit.
+#[cfg(windows)]
 fn stream_once(
     ip: Ipv4Addr,
     ctrl: &Arc<Control>,
@@ -246,6 +282,7 @@ fn stream_once(
 }
 
 /// Publish decoded frames, creating the virtual camera lazily on the first one.
+#[cfg(windows)]
 fn publish_frames(
     cam: &mut Option<ObsVirtualCam>,
     frames: &mut Vec<Frame>,
@@ -268,6 +305,7 @@ fn publish_frames(
 }
 
 /// Media Foundation init (per worker thread).
+#[cfg(windows)]
 fn mf_init() {
     use windows::Win32::Media::MediaFoundation::{MFStartup, MFSTARTUP_LITE};
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
@@ -278,6 +316,7 @@ fn mf_init() {
 }
 
 /// Grow the UDP socket's OS receive buffer to absorb USB bursts during decode.
+#[cfg(windows)]
 fn set_recv_buffer(sock: &UdpSocket, bytes: i32) {
     use std::os::windows::io::AsRawSocket;
     use windows::Win32::Networking::WinSock::{setsockopt, SOCKET, SOL_SOCKET, SO_RCVBUF};
