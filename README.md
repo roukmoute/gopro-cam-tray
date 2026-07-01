@@ -8,6 +8,8 @@ lightweight replacement for GoPro's official (and rarely updated) webcam utility
 - Just works: turn the GoPro on, connect it over USB, and it starts streaming
   automatically; unplug and it goes back to waiting.
 - Low latency, smooth 30 fps, no on-screen artefacts.
+- Replaces GoPro's official Webcam app: you don't need it installed or running
+  (in fact, don't run both at once — see the note below).
 
 ## How it works
 
@@ -72,6 +74,11 @@ implementation targets the desktop; Linux and macOS backends are on the roadmap.
 
 ## Notes and limitations
 
+- **Use only one webcam app at a time.** Don't run this alongside GoPro's
+  official Webcam software: both drive the camera's HTTP API and bind the same
+  UDP port, which conflicts and can leave the camera stuck. If that happens, the
+  fix is on the camera: *Preferences → Connections → Reset Connections* (a USB
+  unplug alone won't reset it, since USB keeps the camera powered).
 - Streams at 1080p30 (whatever the GoPro's USB stream outputs).
 - The low-latency `STARTLTP` protocol used by GoPro's macOS app is not publicly
   documented; this uses the standard UDP/8554 endpoint.
