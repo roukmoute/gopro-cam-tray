@@ -18,7 +18,6 @@ type Handle = isize;
 const INVALID_HANDLE_VALUE: Handle = -1;
 const PAGE_READWRITE: u32 = 0x04;
 const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
-const FILE_MAP_READ: u32 = 0x0004;
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -30,7 +29,6 @@ extern "system" {
         dw_maximum_size_low: u32,
         lp_name: *const u16,
     ) -> Handle;
-    fn OpenFileMappingW(dw_desired_access: u32, b_inherit: i32, lp_name: *const u16) -> Handle;
     fn MapViewOfFile(
         h_map: Handle,
         dw_desired_access: u32,
@@ -107,18 +105,13 @@ impl ObsVirtualCam {
         let name = video_name();
 
         unsafe {
-            // Fail if the mapping already exists (OBS running, or a leftover
-            // instance) — matches OBS behaviour and avoids fighting over it.
-            let existing = OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr());
-            if existing != 0 {
-                CloseHandle(existing);
-                return Err(
-                    "OBSVirtualCamVideo already in use — is OBS (or another \
-                     instance) already running the virtual camera?"
-                        .into(),
-                );
-            }
-
+            // Create the mapping, OR open the existing one if it's still around.
+            // A consuming app (via the OBS filter) keeps the mapping alive after
+            // we exit, so on restart CreateFileMappingW returns that existing
+            // mapping (ERROR_ALREADY_EXISTS) rather than failing — we just become
+            // the writer again. We never run alongside a real OBS, so there is no
+            // second writer to fight. (Previously we bailed here, which killed the
+            // app whenever a video app had the camera open across a restart.)
             let handle = CreateFileMappingW(
                 INVALID_HANDLE_VALUE,
                 std::ptr::null(),

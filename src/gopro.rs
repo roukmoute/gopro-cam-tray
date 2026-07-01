@@ -33,10 +33,12 @@ pub fn http_get(ip: Ipv4Addr, path: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Reset any stale session then start the webcam stream.
+/// Reset any stale session then start the webcam stream. Sending stop before
+/// exit reliably clears a session left running by a previous, unclean shutdown.
 pub fn start(ip: Ipv4Addr) -> Result<(), String> {
+    let _ = http_get(ip, "/gopro/webcam/stop");
     let _ = http_get(ip, "/gopro/webcam/exit");
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(600));
     http_get(ip, "/gopro/webcam/start").map(|_| ())
 }
 
