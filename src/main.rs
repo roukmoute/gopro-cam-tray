@@ -30,6 +30,14 @@ use std::time::{Duration, Instant};
 const INTERVAL_100NS: u64 = 10_000_000 / 30;
 const STREAM_PORT: u16 = 8554;
 
+/// One decoded frame kept for the preview window (tightly-packed NV12).
+pub struct PreviewFrame {
+    pub width: u32,
+    pub height: u32,
+    pub y: Vec<u8>,
+    pub uv: Vec<u8>,
+}
+
 /// Shared control state between the tray (GUI) thread and the watcher thread.
 pub struct Control {
     /// Exit the whole process.
@@ -39,6 +47,11 @@ pub struct Control {
     pub suspended: AtomicBool,
     /// True while a camera session is actively streaming (for the tray status).
     pub streaming: AtomicBool,
+    /// True while the preview window is open. Only then does the stream loop
+    /// stash a frame, so a closed preview costs nothing.
+    pub preview_on: AtomicBool,
+    /// Latest frame for the preview window to draw.
+    pub preview: Mutex<Option<PreviewFrame>>,
 }
 
 impl Control {
@@ -47,6 +60,8 @@ impl Control {
             quit: AtomicBool::new(false),
             suspended: AtomicBool::new(false),
             streaming: AtomicBool::new(false),
+            preview_on: AtomicBool::new(false),
+            preview: Mutex::new(None),
         }
     }
 }
@@ -196,6 +211,15 @@ fn stream_once(
         }
         let frame = queue.lock().unwrap().pop_front();
         if let Some(f) = frame {
+            // Feed the preview window only while it's open (otherwise free).
+            if ctrl.preview_on.load(Ordering::Relaxed) {
+                *ctrl.preview.lock().unwrap() = Some(PreviewFrame {
+                    width: f.width,
+                    height: f.height,
+                    y: f.y.clone(),
+                    uv: f.uv.clone(),
+                });
+            }
             let mut one = vec![f];
             publish_frames(cam, &mut one, vts, &mut announced);
             last_frame = Instant::now();
