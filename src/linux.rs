@@ -184,8 +184,10 @@ impl ksni::Tray for GoProTray {
         "gopro-cam-tray".into()
     }
     fn icon_name(&self) -> String {
-        // Fallback if a host ignores the pixmap below.
-        "camera-web".into()
+        // Empty on purpose: some hosts (GNOME's AppIndicator extension) prefer a
+        // themed icon name over the pixmap when both are set, which would hide
+        // our own icon. Leaving it empty forces them to use icon_pixmap below.
+        String::new()
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         // Our own GoPro icon as 64x64 ARGB32 (network byte order), embedded.
