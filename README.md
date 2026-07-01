@@ -40,8 +40,12 @@ cargo build --release
 
 ## Usage
 
-Run the app. A camera icon appears in the system tray. Turn the GoPro on and
-connect it over USB, then pick **"OBS Virtual Camera"** as your camera in any app.
+1. Run the app. A camera icon appears in the system tray.
+2. Turn the GoPro on and connect it over USB.
+3. In your video app (Zoom, Teams, Google Meet, Discord, the Windows Camera app,
+   ...), open its camera / video settings and select **"OBS Virtual Camera"** as
+   the video device. That's the camera this app feeds; nothing works until you
+   pick it.
 
 Right-click the tray icon:
 
