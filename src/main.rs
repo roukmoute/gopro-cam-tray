@@ -41,7 +41,7 @@ fn main() {
 // ===========================================================================
 
 #[cfg(windows)]
-use mf_decode::Frame;
+use mf_decode::{Frame, FramePool};
 #[cfg(windows)]
 use obs_vcam::ObsVirtualCam;
 #[cfg(windows)]
@@ -49,7 +49,7 @@ use std::collections::VecDeque;
 #[cfg(windows)]
 use std::net::{Ipv4Addr, UdpSocket};
 #[cfg(windows)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(windows)]
 use std::sync::{Arc, Mutex};
 #[cfg(windows)]
@@ -82,6 +82,9 @@ pub struct Control {
     pub preview_on: AtomicBool,
     /// Latest frame for the preview window to draw.
     pub preview: Mutex<Option<PreviewFrame>>,
+    /// Bumped (under the `preview` lock) whenever a new frame is stashed, so
+    /// the preview window can skip re-converting an unchanged frame.
+    pub preview_seq: AtomicU64,
 }
 
 #[cfg(windows)]
@@ -93,6 +96,7 @@ impl Control {
             streaming: AtomicBool::new(false),
             preview_on: AtomicBool::new(false),
             preview: Mutex::new(None),
+            preview_seq: AtomicU64::new(0),
         }
     }
 }
@@ -136,12 +140,16 @@ fn already_running() -> bool {
 fn watch(ctrl: Arc<Control>) {
     let mut cam: Option<ObsVirtualCam> = None;
     let mut vts: u64 = 0;
+    let mut tick = 0u32;
 
     while !ctrl.quit.load(Ordering::SeqCst) {
         if ctrl.suspended.load(Ordering::SeqCst) {
             // While suspended, don't stream. Clear the flag once the camera is
-            // gone, so a later re-plug resumes automatically.
-            if gopro::detect().is_none() {
+            // gone, so a later re-plug resumes automatically. Keep the 500 ms
+            // sleep for quit responsiveness, but only probe the camera every
+            // 2 s — each probe is a full HTTP round-trip to it.
+            tick += 1;
+            if tick % 4 == 0 && gopro::detect().is_none() {
                 ctrl.suspended.store(false, Ordering::SeqCst);
             }
             std::thread::sleep(Duration::from_millis(500));
@@ -178,11 +186,15 @@ fn stream_once(
 
     const MAX_QUEUE: usize = 3;
     let queue: Arc<Mutex<VecDeque<Frame>>> = Arc::new(Mutex::new(VecDeque::new()));
+    // Consumed frame buffers go back to the decoder through this pool, making
+    // the steady-state pipeline allocation-free.
+    let pool = Arc::new(FramePool::default());
 
     let session = Arc::new(AtomicBool::new(true));
     let w_session = session.clone();
     let w_ctrl = ctrl.clone();
     let recv_queue = queue.clone();
+    let w_pool = pool.clone();
     let worker = std::thread::spawn(move || {
         mf_init();
         let sock = match UdpSocket::bind(("0.0.0.0", STREAM_PORT)) {
@@ -193,7 +205,7 @@ fn stream_once(
         set_recv_buffer(&sock, 16 * 1024 * 1024);
 
         let mut demux = mpegts::TsDemux::new();
-        let mut decoder = match mf_decode::Decoder::new() {
+        let mut decoder = match mf_decode::Decoder::new(w_pool.clone()) {
             Ok(d) => d,
             Err(_) => return,
         };
@@ -217,8 +229,11 @@ fn stream_once(
                             for f in frames.drain(..) {
                                 q.push_back(f);
                             }
+                            // Drop the stalest frames, recycling their buffers.
                             while q.len() > MAX_QUEUE {
-                                q.pop_front();
+                                if let Some(f) = q.pop_front() {
+                                    w_pool.put(f.y, f.uv);
+                                }
                             }
                         }
                     }
@@ -247,17 +262,24 @@ fn stream_once(
         }
         let frame = queue.lock().unwrap().pop_front();
         if let Some(f) = frame {
-            // Feed the preview window only while it's open (otherwise free).
+            publish_one(cam, &f, vts, &mut announced);
+            // Hand the frame's buffers to the preview window (no copy) while
+            // it's open, otherwise recycle them straight into the pool.
+            let Frame { width, height, y, uv } = f;
             if ctrl.preview_on.load(Ordering::Relaxed) {
-                *ctrl.preview.lock().unwrap() = Some(PreviewFrame {
-                    width: f.width,
-                    height: f.height,
-                    y: f.y.clone(),
-                    uv: f.uv.clone(),
-                });
+                let old = {
+                    let mut slot = ctrl.preview.lock().unwrap();
+                    ctrl.preview_seq.fetch_add(1, Ordering::Release);
+                    slot.replace(PreviewFrame { width, height, y, uv })
+                };
+                // The displaced frame's buffers drop back into the pool,
+                // outside the preview lock.
+                if let Some(o) = old {
+                    pool.put(o.y, o.uv);
+                }
+            } else {
+                pool.put(y, uv);
             }
-            let mut one = vec![f];
-            publish_frames(cam, &mut one, vts, &mut announced);
             last_frame = Instant::now();
         } else if last_frame.elapsed() > DISCONNECT_AFTER {
             break SessionEnd::Disconnected;
@@ -281,26 +303,24 @@ fn stream_once(
     end
 }
 
-/// Publish decoded frames, creating the virtual camera lazily on the first one.
+/// Publish one decoded frame, creating the virtual camera lazily on the first.
 #[cfg(windows)]
-fn publish_frames(
+fn publish_one(
     cam: &mut Option<ObsVirtualCam>,
-    frames: &mut Vec<Frame>,
+    f: &Frame,
     timestamp: &mut u64,
     announced: &mut bool,
 ) {
-    for f in frames.drain(..) {
-        if cam.is_none() {
-            match ObsVirtualCam::create(f.width, f.height, INTERVAL_100NS) {
-                Ok(c) => *cam = Some(c),
-                Err(_) => return,
-            }
+    if cam.is_none() {
+        match ObsVirtualCam::create(f.width, f.height, INTERVAL_100NS) {
+            Ok(c) => *cam = Some(c),
+            Err(_) => return,
         }
-        if let Some(c) = cam.as_mut() {
-            c.write_nv12(&f.y, &f.uv, *timestamp);
-            *timestamp += INTERVAL_100NS;
-            *announced = true;
-        }
+    }
+    if let Some(c) = cam.as_mut() {
+        c.write_nv12(&f.y, &f.uv, *timestamp);
+        *timestamp += INTERVAL_100NS;
+        *announced = true;
     }
 }
 

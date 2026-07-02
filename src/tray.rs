@@ -3,7 +3,7 @@
 use crate::Control;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
@@ -17,6 +17,20 @@ static CTRL: OnceLock<Arc<Control>> = OnceLock::new();
 /// HWND of the open preview window (0 = none), as a raw isize for atomic access.
 static PREVIEW_HWND: AtomicIsize = AtomicIsize::new(0);
 const PREVIEW_TIMER: usize = 1;
+
+/// Converted-frame cache for the preview window (only one can exist). Repaints
+/// with no new frame reuse the cached BGRA instead of re-copying + converting
+/// ~11 MB — which otherwise runs forever when the stream stalls or the camera
+/// is unplugged while the window stays open. Freed when the window closes.
+struct PaintCache {
+    seq: u64,
+    w: u32,
+    h: u32,
+    y: Vec<u8>,
+    uv: Vec<u8>,
+    bgra: Vec<u8>,
+}
+static PAINT_CACHE: Mutex<Option<PaintCache>> = Mutex::new(None);
 
 const WM_TRAYICON: u32 = WM_APP + 1;
 const ID_SUSPEND: usize = 2;
@@ -269,6 +283,7 @@ extern "system" fn preview_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     c.preview_on.store(false, Ordering::SeqCst);
                     *c.preview.lock().unwrap() = None; // free the buffer
                 }
+                *PAINT_CACHE.lock().unwrap() = None; // ~11 MB, and never show a stale frame on reopen
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -276,7 +291,9 @@ extern "system" fn preview_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 }
 
-/// Draw the latest frame, scaled to the client area, via GDI.
+/// Draw the latest frame, scaled to the client area, via GDI. Copy + colour
+/// conversion only happen when the producer published a new frame since the
+/// last paint; otherwise the cached BGRA is blitted as-is.
 unsafe fn paint_preview(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -285,68 +302,110 @@ unsafe fn paint_preview(hwnd: HWND) {
     let _ = GetClientRect(hwnd, &mut rc);
     let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
 
-    // Grab the latest frame quickly, then release the lock before converting.
-    let frame = CTRL
-        .get()
-        .and_then(|c| c.preview.lock().unwrap().as_ref().map(|f| {
-            (f.width, f.height, f.y.clone(), f.uv.clone())
-        }));
+    if let Some(ctrl) = CTRL.get() {
+        let mut cache = PAINT_CACHE.lock().unwrap();
+        let cached_seq = cache.as_ref().map(|c| c.seq);
 
-    if let Some((w, h, y, uv)) = frame {
-        let bgra = nv12_to_bgra(w as usize, h as usize, &y, &uv);
-        let mut bmi = BITMAPINFO::default();
-        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        bmi.bmiHeader.biWidth = w as i32;
-        bmi.bmiHeader.biHeight = -(h as i32); // top-down
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = 0; // BI_RGB
-        SetStretchBltMode(hdc, COLORONCOLOR);
-        StretchDIBits(
-            hdc,
-            0,
-            0,
-            cw,
-            ch,
-            0,
-            0,
-            w as i32,
-            h as i32,
-            Some(bgra.as_ptr() as *const c_void),
-            &bmi,
-            DIB_RGB_COLORS,
-            SRCCOPY,
-        );
+        if cached_seq != Some(ctrl.preview_seq.load(Ordering::Acquire)) {
+            // New frame: copy it out under the preview lock (kept short), then
+            // convert after releasing it. Buffers are reused across paints.
+            let mut copied = false;
+            {
+                let guard = ctrl.preview.lock().unwrap();
+                if let Some(f) = guard.as_ref() {
+                    let c = cache.get_or_insert_with(|| PaintCache {
+                        seq: 0,
+                        w: 0,
+                        h: 0,
+                        y: Vec::new(),
+                        uv: Vec::new(),
+                        bgra: Vec::new(),
+                    });
+                    // Re-read the seq under the lock so it always matches the
+                    // frame we actually copied.
+                    c.seq = ctrl.preview_seq.load(Ordering::Acquire);
+                    c.w = f.width;
+                    c.h = f.height;
+                    c.y.clear();
+                    c.y.extend_from_slice(&f.y);
+                    c.uv.clear();
+                    c.uv.extend_from_slice(&f.uv);
+                    copied = true;
+                }
+            }
+            if copied {
+                let c = cache.as_mut().unwrap();
+                nv12_to_bgra_into(&mut c.bgra, c.w as usize, c.h as usize, &c.y, &c.uv);
+            }
+        }
+
+        if let Some(c) = cache.as_ref().filter(|c| !c.bgra.is_empty()) {
+            let mut bmi = BITMAPINFO::default();
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = c.w as i32;
+            bmi.bmiHeader.biHeight = -(c.h as i32); // top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = 0; // BI_RGB
+            SetStretchBltMode(hdc, COLORONCOLOR);
+            StretchDIBits(
+                hdc,
+                0,
+                0,
+                cw,
+                ch,
+                0,
+                0,
+                c.w as i32,
+                c.h as i32,
+                Some(c.bgra.as_ptr() as *const c_void),
+                &bmi,
+                DIB_RGB_COLORS,
+                SRCCOPY,
+            );
+        }
     }
 
     let _ = EndPaint(hwnd, &ps);
 }
 
-/// Convert tightly-packed NV12 to 32-bit BGRA (BT.601) for a top-down DIB.
-fn nv12_to_bgra(w: usize, h: usize, y: &[u8], uv: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; w * h * 4];
+/// Convert tightly-packed NV12 into `out` as 32-bit BGRA (BT.601, top-down
+/// DIB), reusing `out`'s allocation. Works on pixel pairs so each U/V sample's
+/// products are computed once (NV12 dimensions are even).
+fn nv12_to_bgra_into(out: &mut Vec<u8>, w: usize, h: usize, y: &[u8], uv: &[u8]) {
+    debug_assert!(w % 2 == 0);
+    out.resize(w * h * 4, 0);
     for row in 0..h {
-        let uv_row = (row / 2) * w;
-        for col in 0..w {
-            let yy = y[row * w + col] as i32;
-            let uv_i = uv_row + (col & !1);
-            let u = uv[uv_i] as i32;
-            let v = uv[uv_i + 1] as i32;
-
-            let c = yy - 16;
-            let d = u - 128;
-            let e = v - 128;
-            let r = (298 * c + 409 * e + 128) >> 8;
-            let g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-            let b = (298 * c + 516 * d + 128) >> 8;
-
-            let o = (row * w + col) * 4;
-            out[o] = b.clamp(0, 255) as u8;
-            out[o + 1] = g.clamp(0, 255) as u8;
-            out[o + 2] = r.clamp(0, 255) as u8;
-            out[o + 3] = 255;
+        let y_row = &y[row * w..][..w];
+        let uv_row = &uv[(row / 2) * w..][..w];
+        let out_row = &mut out[row * w * 4..][..w * 4];
+        for ((out_pair, y_pair), uv_pair) in out_row
+            .chunks_exact_mut(8)
+            .zip(y_row.chunks_exact(2))
+            .zip(uv_row.chunks_exact(2))
+        {
+            let d = uv_pair[0] as i32 - 128;
+            let e = uv_pair[1] as i32 - 128;
+            let re = 409 * e + 128;
+            let ge = -100 * d - 208 * e + 128;
+            let be = 516 * d + 128;
+            for k in 0..2 {
+                let c = 298 * (y_pair[k] as i32 - 16);
+                let px = &mut out_pair[k * 4..k * 4 + 4];
+                px[0] = ((c + be) >> 8).clamp(0, 255) as u8;
+                px[1] = ((c + ge) >> 8).clamp(0, 255) as u8;
+                px[2] = ((c + re) >> 8).clamp(0, 255) as u8;
+                px[3] = 255;
+            }
         }
     }
+}
+
+/// Convenience wrapper (kept for the unit tests' sake).
+#[cfg(test)]
+fn nv12_to_bgra(w: usize, h: usize, y: &[u8], uv: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    nv12_to_bgra_into(&mut out, w, h, y, uv);
     out
 }
 
@@ -388,5 +447,58 @@ mod tests {
         // BT.601 red (Y=81, U=90, V=240) must come out as B=0, G=0, R=255.
         let (y, uv) = solid(2, 2, 81, 90, 240);
         assert_eq!(&nv12_to_bgra(2, 2, &y, &uv)[0..4], &[0, 0, 255, 255]);
+    }
+
+    // The straightforward per-pixel formula the optimized pair-wise loop must
+    // reproduce byte for byte (this was the original implementation).
+    fn reference_nv12_to_bgra(w: usize, h: usize, y: &[u8], uv: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; w * h * 4];
+        for row in 0..h {
+            let uv_row = (row / 2) * w;
+            for col in 0..w {
+                let yy = y[row * w + col] as i32;
+                let uv_i = uv_row + (col & !1);
+                let u = uv[uv_i] as i32;
+                let v = uv[uv_i + 1] as i32;
+
+                let c = yy - 16;
+                let d = u - 128;
+                let e = v - 128;
+                let r = (298 * c + 409 * e + 128) >> 8;
+                let g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+                let b = (298 * c + 516 * d + 128) >> 8;
+
+                let o = (row * w + col) * 4;
+                out[o] = b.clamp(0, 255) as u8;
+                out[o + 1] = g.clamp(0, 255) as u8;
+                out[o + 2] = r.clamp(0, 255) as u8;
+                out[o + 3] = 255;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn matches_reference_on_random_input() {
+        // Deterministic pseudo-random NV12 image (catches U/V or intra-pair
+        // mixups that solid colours cannot).
+        let (w, h) = (16usize, 8usize);
+        let mut state = 0x12345678u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 24) as u8
+        };
+        let y: Vec<u8> = (0..w * h).map(|_| next()).collect();
+        let uv: Vec<u8> = (0..w * h / 2).map(|_| next()).collect();
+        assert_eq!(nv12_to_bgra(w, h, &y, &uv), reference_nv12_to_bgra(w, h, &y, &uv));
+    }
+
+    #[test]
+    fn into_reuses_and_resizes_the_output_buffer() {
+        let (y, uv) = solid(4, 2, 128, 128, 128);
+        let mut out = vec![0xAAu8; 999]; // wrong size, stale content
+        super::nv12_to_bgra_into(&mut out, 4, 2, &y, &uv);
+        assert_eq!(out.len(), 4 * 2 * 4);
+        assert_eq!(out, nv12_to_bgra(4, 2, &y, &uv));
     }
 }

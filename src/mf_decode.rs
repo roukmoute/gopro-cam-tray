@@ -3,6 +3,7 @@
 //! Annex-B access units and get back tightly-packed NV12 frames (stride removed).
 
 use std::mem::ManuallyDrop;
+use std::sync::{Arc, Mutex};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
@@ -18,6 +19,28 @@ pub struct Frame {
     pub uv: Vec<u8>, // width*height/2 (interleaved)
 }
 
+/// Recycles the (y, uv) buffers of consumed frames back to the decoder, so the
+/// steady-state 30 fps pipeline reuses ~3 MB buffers instead of allocating and
+/// zeroing fresh ones for every frame (~93 MB/s of churn at 1080p30).
+#[derive(Default)]
+pub struct FramePool(Mutex<Vec<(Vec<u8>, Vec<u8>)>>);
+
+impl FramePool {
+    /// A handful of slots covers the jitter queue plus in-flight frames.
+    const CAP: usize = 6;
+
+    fn get(&self) -> (Vec<u8>, Vec<u8>) {
+        self.0.lock().unwrap().pop().unwrap_or_default()
+    }
+
+    pub fn put(&self, y: Vec<u8>, uv: Vec<u8>) {
+        let mut slots = self.0.lock().unwrap();
+        if slots.len() < Self::CAP {
+            slots.push((y, uv));
+        }
+    }
+}
+
 pub struct Decoder {
     transform: IMFTransform,
     width: u32,  // coded width
@@ -28,11 +51,16 @@ pub struct Decoder {
     crop_y: usize,
     disp_w: u32,
     disp_h: u32,
+    pool: Arc<FramePool>,
+    // Output sample + buffer reused across ProcessOutput calls (the MFT runs in
+    // caller-allocates mode and never retains them past the call). Saves a
+    // fresh ~3 MB Media Foundation allocation per decoded frame.
+    out_sample: Option<(IMFSample, IMFMediaBuffer, u32)>,
 }
 
 impl Decoder {
     /// Caller must have called CoInitializeEx + MFStartup beforehand.
-    pub fn new() -> windows::core::Result<Self> {
+    pub fn new(pool: Arc<FramePool>) -> windows::core::Result<Self> {
         unsafe {
             let transform: IMFTransform =
                 CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER)?;
@@ -61,6 +89,8 @@ impl Decoder {
                 crop_y: 0,
                 disp_w: 0,
                 disp_h: 0,
+                pool,
+                out_sample: None,
             };
             dec.select_nv12_output()?;
 
@@ -146,13 +176,26 @@ impl Decoder {
         }
     }
 
+    /// The reusable output sample, (re)created when the required size grows.
+    fn output_sample(&mut self) -> windows::core::Result<(IMFSample, IMFMediaBuffer)> {
+        unsafe {
+            let need = self.transform.GetOutputStreamInfo(0)?.cbSize;
+            if !matches!(&self.out_sample, Some((_, _, cap)) if *cap >= need) {
+                let sample = MFCreateSample()?;
+                let buf = MFCreateMemoryBuffer(need)?;
+                sample.AddBuffer(&buf)?;
+                self.out_sample = Some((sample, buf, need));
+            }
+            let (sample, buf, _) = self.out_sample.as_ref().unwrap();
+            buf.SetCurrentLength(0)?;
+            Ok((sample.clone(), buf.clone()))
+        }
+    }
+
     fn drain(&mut self, out: &mut Vec<Frame>) -> windows::core::Result<()> {
         unsafe {
             loop {
-                let info = self.transform.GetOutputStreamInfo(0)?;
-                let out_sample = MFCreateSample()?;
-                let out_buf = MFCreateMemoryBuffer(info.cbSize)?;
-                out_sample.AddBuffer(&out_buf)?;
+                let (out_sample, _out_buf) = self.output_sample()?;
 
                 let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
                     dwStreamID: 0,
@@ -175,6 +218,8 @@ impl Decoder {
                     Err(e) if e.code().0 == E_NEED_MORE_INPUT => return Ok(()),
                     Err(e) if e.code().0 == E_STREAM_CHANGE => {
                         self.select_nv12_output()?;
+                        // The required output size may have changed with it.
+                        self.out_sample = None;
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -202,13 +247,17 @@ impl Decoder {
             let dw = self.disp_w as usize;
             let dh = self.disp_h as usize;
 
-            let mut y = vec![0u8; dw * dh];
+            // Recycled buffers: resize only re-zeroes when the resolution
+            // changes; in steady state the rows below overwrite them in place.
+            let (mut y, mut uv) = self.pool.get();
+            y.resize(dw * dh, 0);
+            uv.resize(dw * dh / 2, 0);
+
             for row in 0..dh {
                 let src = ptr.add((self.crop_y + row) * stride + self.crop_x);
                 std::ptr::copy_nonoverlapping(src, y.as_mut_ptr().add(row * dw), dw);
             }
 
-            let mut uv = vec![0u8; dw * dh / 2];
             for row in 0..(dh / 2) {
                 let src = ptr.add(uv_off + (self.crop_y / 2 + row) * stride + self.crop_x);
                 std::ptr::copy_nonoverlapping(src, uv.as_mut_ptr().add(row * dw), dw);

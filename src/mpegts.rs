@@ -39,8 +39,11 @@ impl TsDemux {
                 i += 1;
                 continue;
             }
-            let pkt = &self.buf[i..i + TS_PACKET].to_vec();
-            self.handle_packet(pkt, &mut out);
+            // Stack copy: ends the borrow of self.buf without a heap alloc per
+            // packet (~10,000/s at stream bitrate).
+            let mut pkt = [0u8; TS_PACKET];
+            pkt.copy_from_slice(&self.buf[i..i + TS_PACKET]);
+            self.handle_packet(&pkt, &mut out);
             i += TS_PACKET;
         }
         // Keep the unconsumed tail.
