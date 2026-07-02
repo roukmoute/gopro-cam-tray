@@ -7,8 +7,8 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
-# Cross-platform GoPro control (HTTP, no TLS) + USB interface discovery.
-ureq = { version = "2", default-features = false }
+# USB interface discovery (the GoPro HTTP control client is hand-rolled over
+# TcpStream in gopro.rs — no HTTP-library dependency).
 if-addrs = "0.13"
 
 # Windows-only: system tray, OBS shared-memory sink, Media Foundation decoder.
@@ -26,13 +26,12 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# Linux-only: Ctrl+C handling, system-tray (StatusNotifierItem via ksni/zbus,
-# pure Rust so the static musl build stays dependency-free), and libc for the
-# ffmpeg-dies-with-us + single-instance guards.
+# Linux-only: system-tray (StatusNotifierItem via ksni/zbus, pure Rust so the
+# static musl build stays dependency-free) and libc for signal handling, the
+# ffmpeg-dies-with-us and single-instance guards.
 [target.'cfg(target_os = "linux")'.dependencies]
-ctrlc = "3"
 ksni = "0.3"
-tokio = { version = "1", features = ["rt", "time", "net"] }
+tokio = { version = "1", features = ["rt", "time"] }
 libc = "0.2"
 
 [build-dependencies]
