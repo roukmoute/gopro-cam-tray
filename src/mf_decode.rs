@@ -26,8 +26,11 @@ pub struct Frame {
 pub struct FramePool(Mutex<Vec<(Vec<u8>, Vec<u8>)>>);
 
 impl FramePool {
-    /// A handful of slots covers the jitter queue plus in-flight frames.
-    const CAP: usize = 6;
+    /// Idle spares kept ready. The consumer returns one buffer per 30 Hz tick
+    /// and the decoder takes one per frame, so 2 absorbs the jitter; anything
+    /// beyond that is returned to the OS (each spare pins ~3 MB of RSS at
+    /// 1080p, so a generous cap shows up directly in the process footprint).
+    const CAP: usize = 2;
 
     fn get(&self) -> (Vec<u8>, Vec<u8>) {
         self.0.lock().unwrap().pop().unwrap_or_default()
