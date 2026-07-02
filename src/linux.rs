@@ -22,6 +22,22 @@ struct Control {
     streaming: AtomicBool,
 }
 
+impl Control {
+    /// Quit was requested, via the tray menu or a signal.
+    fn quitting(&self) -> bool {
+        self.quit.load(Ordering::SeqCst) || SIG_QUIT.load(Ordering::Relaxed)
+    }
+}
+
+/// Set by the SIGINT/SIGTERM handler; an atomic store is async-signal-safe,
+/// which is all a handler may do (this replaces the ctrlc crate and its
+/// dedicated signal thread).
+static SIG_QUIT: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_quit_signal(_: libc::c_int) {
+    SIG_QUIT.store(true, Ordering::Relaxed);
+}
+
 pub fn run() {
     // Single instance: hold an flock for the whole process lifetime.
     let _lock = match acquire_lock() {
@@ -55,9 +71,11 @@ pub fn run() {
         streaming: AtomicBool::new(false),
     });
 
-    {
-        let c = ctrl.clone();
-        let _ = ctrlc::set_handler(move || c.quit.store(true, Ordering::SeqCst));
+    // Quit cleanly (stop the camera, remove the tray icon) on Ctrl+C or a
+    // polite kill. The loops below poll quitting() every 300-500 ms.
+    unsafe {
+        libc::signal(libc::SIGINT, on_quit_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_quit_signal as libc::sighandler_t);
     }
 
     // Streaming loop on its own thread.
@@ -75,10 +93,14 @@ pub fn run() {
 // --- Streaming ------------------------------------------------------------
 
 fn stream_loop(ctrl: Arc<Control>, device: String) {
-    while !ctrl.quit.load(Ordering::SeqCst) {
+    let mut tick = 0u32;
+    while !ctrl.quitting() {
         if ctrl.suspended.load(Ordering::SeqCst) {
             // Auto-clear once the camera is unplugged, so a re-plug resumes.
-            if gopro::detect().is_none() {
+            // Keep the 500 ms sleep for quit responsiveness, but only probe
+            // every 2 s: each probe is a full HTTP round-trip to the camera.
+            tick += 1;
+            if tick % 4 == 0 && gopro::detect().is_none() {
                 ctrl.suspended.store(false, Ordering::SeqCst);
             }
             std::thread::sleep(Duration::from_millis(500));
@@ -99,7 +121,7 @@ fn stream_loop(ctrl: Arc<Control>, device: String) {
         ctrl.streaming.store(true, Ordering::SeqCst);
 
         if let Ok(mut child) = spawn_ffmpeg(&device) {
-            while !ctrl.quit.load(Ordering::SeqCst) && !ctrl.suspended.load(Ordering::SeqCst) {
+            while !ctrl.quitting() && !ctrl.suspended.load(Ordering::SeqCst) {
                 match child.try_wait() {
                     Ok(Some(_)) => break, // ffmpeg exited (camera gone / error)
                     Ok(None) => std::thread::sleep(Duration::from_millis(300)),
@@ -112,7 +134,7 @@ fn stream_loop(ctrl: Arc<Control>, device: String) {
 
         ctrl.streaming.store(false, Ordering::SeqCst);
         gopro::stop(ip);
-        if !ctrl.quit.load(Ordering::SeqCst) {
+        if !ctrl.quitting() {
             std::thread::sleep(Duration::from_millis(500));
         }
     }
@@ -122,7 +144,13 @@ fn stream_loop(ctrl: Arc<Control>, device: String) {
 /// The child is set to die with us (PR_SET_PDEATHSIG) so a killed daemon never
 /// leaves an ffmpeg holding the UDP port.
 fn spawn_ffmpeg(device: &str) -> std::io::Result<Child> {
-    let input = format!("udp://0.0.0.0:{STREAM_PORT}?overrun_nonfatal=1&fifo_size=5000000");
+    // CAREFUL: fifo_size is in 188-byte TS packets, NOT bytes. 85,000 packets
+    // ~= 16 MB (mirroring the 16 MB socket buffer we also request), still >20 s
+    // of stream. The old value of 5,000,000 silently allocated a ~940 MB ring
+    // that ffmpeg's writer eventually dirtied in full.
+    let input = format!(
+        "udp://0.0.0.0:{STREAM_PORT}?overrun_nonfatal=1&fifo_size=85000&buffer_size=16777216"
+    );
     let mut cmd = Command::new("ffmpeg");
     cmd.args([
         "-hide_banner",
@@ -132,8 +160,22 @@ fn spawn_ffmpeg(device: &str) -> std::io::Result<Child> {
         "nobuffer",
         "-flags",
         "low_delay",
+        // 2 decoder threads handle 1080p30 easily; the default pool of ~nproc
+        // frame-threads costs several MB of decoder state each.
+        "-threads",
+        "2",
+        // Trim stream probing (defaults: 5 MB / up to 5 s) for a faster first
+        // frame on (re)connect; 2 MB / 2 s still covers several IDR intervals.
+        "-probesize",
+        "2000000",
+        "-analyzeduration",
+        "2000000",
         "-i",
         &input,
+        // Video only: never demux/decode stray audio/subtitle/data PIDs.
+        "-an",
+        "-sn",
+        "-dn",
         "-pix_fmt",
         "yuv420p",
         "-f",
@@ -158,6 +200,12 @@ fn spawn_ffplay(device: &str) -> std::io::Result<Child> {
         "-hide_banner",
         "-loglevel",
         "error",
+        // Video only (skips SDL audio init + sound-server connection) and no
+        // input buffering: the loopback is live video.
+        "-an",
+        "-sn",
+        "-fflags",
+        "nobuffer",
         // Small, always-on-top thumbnail instead of a full-size window.
         "-x",
         "480",
@@ -300,7 +348,7 @@ fn run_tray(ctrl: Arc<Control>, device: String) {
         Ok(rt) => rt,
         Err(_) => {
             // No async runtime => run headless until quit.
-            while !ctrl.quit.load(Ordering::SeqCst) {
+            while !ctrl.quitting() {
                 std::thread::sleep(Duration::from_millis(300));
             }
             return;
@@ -318,13 +366,25 @@ fn run_tray(ctrl: Arc<Control>, device: String) {
         if handle.is_none() {
             eprintln!("Could not register the tray icon (no StatusNotifier host?). Running headless.");
         }
+        // Refresh the tray only when the state it displays actually changed:
+        // each update() makes ksni rebuild the menu and re-hash the icon, so
+        // calling it unconditionally would burn CPU twice a second at idle.
+        // (Menu clicks refresh themselves; ksni updates after each activate.)
+        let mut shown: Option<(bool, bool, bool)> = None;
         loop {
-            if ctrl.quit.load(Ordering::SeqCst) {
+            if ctrl.quitting() {
                 break;
             }
-            // Refresh the menu/status to reflect the streaming thread's state.
-            if let Some(h) = &handle {
-                let _ = h.update(|_t: &mut GoProTray| {}).await;
+            let state = (
+                ctrl.streaming.load(Ordering::SeqCst),
+                ctrl.suspended.load(Ordering::SeqCst),
+                autostart_enabled(),
+            );
+            if shown != Some(state) {
+                shown = Some(state);
+                if let Some(h) = &handle {
+                    let _ = h.update(|_t: &mut GoProTray| {}).await;
+                }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
